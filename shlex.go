@@ -44,16 +44,17 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 // TokenType is a top-level token classification: A word, space, comment, unknown.
-type TokenType int
+type TokenType int8
 
 // runeTokenClass is the type of a UTF-8 character classification: A quote, space, escape.
-type runeTokenClass int
+type runeTokenClass int8
 
 // the internal state used by the lexer state machine
-type lexerState int
+type lexerState int8
 
 // Token is a (type, value) pair representing a lexographical token.
 type Token struct {
@@ -133,9 +134,37 @@ func newDefaultClassifier() tokenClassifier {
 	return t
 }
 
+// TODO: use an array
+var defaultClassifier = newDefaultClassifier()
+
 // ClassifyRune classifiees a rune
 func (t tokenClassifier) ClassifyRune(runeVal rune) runeTokenClass {
 	return t[runeVal]
+}
+
+var tokenClasses [255]runeTokenClass
+
+func init() {
+	for i := range tokenClasses {
+		tokenClasses[i] = unknownRuneClass
+	}
+	set := func(s string, cls runeTokenClass) {
+		for _, c := range []byte(s) {
+			tokenClasses[c] = cls
+		}
+	}
+	set(spaceRunes, spaceRuneClass)
+	set(escapingQuoteRunes, escapingQuoteRuneClass)
+	set(nonEscapingQuoteRunes, nonEscapingQuoteRuneClass)
+	set(escapeRunes, escapeRuneClass)
+	set(commentRunes, commentRuneClass)
+}
+
+func classifyRune(r rune) runeTokenClass {
+	if r <= 255 {
+		return tokenClasses[uint8(r)]
+	}
+	return unknownRuneClass
 }
 
 // Lexer turns an input stream into a sequence of tokens. Whitespace and comments are skipped.
@@ -178,7 +207,8 @@ func NewTokenizer(r io.Reader) *Tokenizer {
 	classifier := newDefaultClassifier()
 	return &Tokenizer{
 		input:      *input,
-		classifier: classifier}
+		classifier: classifier,
+	}
 }
 
 // scanStream scans the stream for the next token using the internal state machine.
@@ -195,201 +225,134 @@ func (t *Tokenizer) scanStream() (*Token, error) {
 		nextRune, _, err = t.input.ReadRune()
 		nextRuneType = t.classifier.ClassifyRune(nextRune)
 
-		if err == io.EOF {
-			nextRuneType = eofRuneClass
-			err = nil
-		} else if err != nil {
-			return nil, err
+		if err != nil {
+			if err == io.EOF {
+				nextRuneType = eofRuneClass
+				err = nil
+			} else {
+				return nil, err
+			}
 		}
 
 		switch state {
 		case startState: // no runes read yet
-			{
-				switch nextRuneType {
-				case eofRuneClass:
-					{
-						return nil, io.EOF
-					}
-				case spaceRuneClass:
-					{
-					}
-				case escapingQuoteRuneClass:
-					{
-						tokenType = WordToken
-						state = quotingEscapingState
-					}
-				case nonEscapingQuoteRuneClass:
-					{
-						tokenType = WordToken
-						state = quotingState
-					}
-				case escapeRuneClass:
-					{
-						tokenType = WordToken
-						state = escapingState
-					}
-				case commentRuneClass:
-					{
-						tokenType = CommentToken
-						state = commentState
-					}
-				default:
-					{
-						tokenType = WordToken
-						value = append(value, nextRune)
-						state = inWordState
-					}
-				}
+			switch nextRuneType {
+			case eofRuneClass:
+				return nil, io.EOF
+			case spaceRuneClass:
+				// skip
+			case escapingQuoteRuneClass:
+				tokenType = WordToken
+				state = quotingEscapingState
+			case nonEscapingQuoteRuneClass:
+				tokenType = WordToken
+				state = quotingState
+			case escapeRuneClass:
+				tokenType = WordToken
+				state = escapingState
+			case commentRuneClass:
+				tokenType = CommentToken
+				state = commentState
+			default:
+				tokenType = WordToken
+				value = append(value, nextRune)
+				state = inWordState
 			}
 		case inWordState: // in a regular word
-			{
-				switch nextRuneType {
-				case eofRuneClass:
-					{
-						token := &Token{
-							tokenType: tokenType,
-							value:     string(value)}
-						return token, err
-					}
-				case spaceRuneClass:
-					{
-						token := &Token{
-							tokenType: tokenType,
-							value:     string(value)}
-						return token, err
-					}
-				case escapingQuoteRuneClass:
-					{
-						state = quotingEscapingState
-					}
-				case nonEscapingQuoteRuneClass:
-					{
-						state = quotingState
-					}
-				case escapeRuneClass:
-					{
-						state = escapingState
-					}
-				default:
-					{
-						value = append(value, nextRune)
-					}
-				}
+			switch nextRuneType {
+			case eofRuneClass:
+				token := &Token{
+					tokenType: tokenType,
+					value:     string(value)}
+				return token, err
+			case spaceRuneClass:
+				token := &Token{
+					tokenType: tokenType,
+					value:     string(value)}
+				return token, err
+			case escapingQuoteRuneClass:
+				state = quotingEscapingState
+			case nonEscapingQuoteRuneClass:
+				state = quotingState
+			case escapeRuneClass:
+				state = escapingState
+			default:
+				value = append(value, nextRune)
 			}
 		case escapingState: // the rune after an escape character
-			{
-				switch nextRuneType {
-				case eofRuneClass:
-					{
-						err = fmt.Errorf("EOF found after escape character")
-						token := &Token{
-							tokenType: tokenType,
-							value:     string(value)}
-						return token, err
-					}
-				default:
-					{
-						state = inWordState
-						value = append(value, nextRune)
-					}
-				}
+			switch nextRuneType {
+			case eofRuneClass:
+				err = fmt.Errorf("EOF found after escape character")
+				token := &Token{
+					tokenType: tokenType,
+					value:     string(value)}
+				return token, err
+			default:
+				state = inWordState
+				value = append(value, nextRune)
 			}
 		case escapingQuotedState: // the next rune after an escape character, in double quotes
-			{
-				switch nextRuneType {
-				case eofRuneClass:
-					{
-						err = fmt.Errorf("EOF found after escape character")
-						token := &Token{
-							tokenType: tokenType,
-							value:     string(value)}
-						return token, err
-					}
-				default:
-					{
-						state = quotingEscapingState
-						value = append(value, nextRune)
-					}
-				}
+			switch nextRuneType {
+			case eofRuneClass:
+				err = fmt.Errorf("EOF found after escape character")
+				token := &Token{
+					tokenType: tokenType,
+					value:     string(value)}
+				return token, err
+			default:
+				state = quotingEscapingState
+				value = append(value, nextRune)
 			}
 		case quotingEscapingState: // in escaping double quotes
-			{
-				switch nextRuneType {
-				case eofRuneClass:
-					{
-						err = fmt.Errorf("EOF found when expecting closing quote")
-						token := &Token{
-							tokenType: tokenType,
-							value:     string(value)}
-						return token, err
-					}
-				case escapingQuoteRuneClass:
-					{
-						state = inWordState
-					}
-				case escapeRuneClass:
-					{
-						state = escapingQuotedState
-					}
-				default:
-					{
-						value = append(value, nextRune)
-					}
-				}
+			switch nextRuneType {
+			case eofRuneClass:
+				err = fmt.Errorf("EOF found when expecting closing quote")
+				token := &Token{
+					tokenType: tokenType,
+					value:     string(value)}
+				return token, err
+			case escapingQuoteRuneClass:
+				state = inWordState
+			case escapeRuneClass:
+				state = escapingQuotedState
+			default:
+				value = append(value, nextRune)
 			}
 		case quotingState: // in non-escaping single quotes
-			{
-				switch nextRuneType {
-				case eofRuneClass:
-					{
-						err = fmt.Errorf("EOF found when expecting closing quote")
-						token := &Token{
-							tokenType: tokenType,
-							value:     string(value)}
-						return token, err
-					}
-				case nonEscapingQuoteRuneClass:
-					{
-						state = inWordState
-					}
-				default:
-					{
-						value = append(value, nextRune)
-					}
-				}
+			switch nextRuneType {
+			case eofRuneClass:
+				err = fmt.Errorf("EOF found when expecting closing quote")
+				token := &Token{
+					tokenType: tokenType,
+					value:     string(value)}
+				return token, err
+			case nonEscapingQuoteRuneClass:
+				state = inWordState
+			default:
+				value = append(value, nextRune)
 			}
 		case commentState: // in a comment
-			{
-				switch nextRuneType {
-				case eofRuneClass:
-					{
-						token := &Token{
-							tokenType: tokenType,
-							value:     string(value)}
-						return token, err
-					}
-				case spaceRuneClass:
-					{
-						if nextRune == '\n' {
-							state = startState
-							token := &Token{
-								tokenType: tokenType,
-								value:     string(value)}
-							return token, err
-						} else {
-							value = append(value, nextRune)
-						}
-					}
-				default:
-					{
-						value = append(value, nextRune)
-					}
+			switch nextRuneType {
+			case eofRuneClass:
+				token := &Token{
+					tokenType: tokenType,
+					value:     string(value)}
+				return token, err
+			case spaceRuneClass:
+				if nextRune == '\n' {
+					state = startState
+					token := &Token{
+						tokenType: tokenType,
+						value:     string(value)}
+					return token, err
+				} else {
+					value = append(value, nextRune)
 				}
+			default:
+				value = append(value, nextRune)
 			}
 		default:
-			{
-				return nil, fmt.Errorf("Unexpected state: %v", state)
-			}
+			return nil, fmt.Errorf("Unexpected state: %v", state)
 		}
 	}
 }
@@ -399,12 +362,202 @@ func (t *Tokenizer) Next() (*Token, error) {
 	return t.scanStream()
 }
 
+type StringTokenizer struct {
+	str string
+}
+
+// scanStream scans the stream for the next token using the internal state machine.
+// It will panic if it encounters a rune which it does not know how to handle.
+func (t *StringTokenizer) scanStream() (*Token, error) {
+	state := startState
+	var tokenType TokenType
+	var nextRune rune
+	var nextRuneType runeTokenClass
+	var err error
+
+	// TODO: grow a reasonable amount
+	var value strings.Builder
+	// value.Grow(32)
+
+	for {
+		if len(t.str) > 0 {
+			var n int
+			nextRune, n = utf8.DecodeRuneInString(t.str)
+			// nextRuneType = classifier.ClassifyRune(nextRune)
+			nextRuneType = classifyRune(nextRune)
+			t.str = t.str[n:]
+		} else {
+			nextRuneType = eofRuneClass
+		}
+
+		switch state {
+		case startState: // no runes read yet
+			switch nextRuneType {
+			case eofRuneClass:
+				return nil, io.EOF
+			case spaceRuneClass:
+				// skip
+			case escapingQuoteRuneClass:
+				tokenType = WordToken
+				state = quotingEscapingState
+			case nonEscapingQuoteRuneClass:
+				tokenType = WordToken
+				state = quotingState
+			case escapeRuneClass:
+				tokenType = WordToken
+				state = escapingState
+			case commentRuneClass:
+				tokenType = CommentToken
+				state = commentState
+			default:
+				tokenType = WordToken
+				// value = append(value, nextRune)
+				value.WriteRune(nextRune)
+				state = inWordState
+			}
+		case inWordState: // in a regular word
+			switch nextRuneType {
+			case eofRuneClass:
+				token := &Token{
+					tokenType: tokenType,
+					value:     value.String(),
+				}
+				return token, err
+			case spaceRuneClass:
+				token := &Token{
+					tokenType: tokenType,
+					value:     value.String(),
+				}
+				return token, err
+			case escapingQuoteRuneClass:
+				state = quotingEscapingState
+			case nonEscapingQuoteRuneClass:
+				state = quotingState
+			case escapeRuneClass:
+				state = escapingState
+			default:
+				// value = append(value, nextRune)
+				value.WriteRune(nextRune)
+			}
+		case escapingState: // the rune after an escape character
+			switch nextRuneType {
+			case eofRuneClass:
+				err = fmt.Errorf("EOF found after escape character")
+				token := &Token{
+					tokenType: tokenType,
+					value:     value.String(),
+				}
+				return token, err
+			default:
+				state = inWordState
+				// value = append(value, nextRune)
+				value.WriteRune(nextRune)
+			}
+		case escapingQuotedState: // the next rune after an escape character, in double quotes
+			switch nextRuneType {
+			case eofRuneClass:
+				err = fmt.Errorf("EOF found after escape character")
+				token := &Token{
+					tokenType: tokenType,
+					value:     value.String(),
+				}
+				return token, err
+			default:
+				state = quotingEscapingState
+				// value = append(value, nextRune)
+				value.WriteRune(nextRune)
+			}
+		case quotingEscapingState: // in escaping double quotes
+			switch nextRuneType {
+			case eofRuneClass:
+				err = fmt.Errorf("EOF found when expecting closing quote")
+				token := &Token{
+					tokenType: tokenType,
+					value:     value.String(),
+				}
+				return token, err
+			case escapingQuoteRuneClass:
+				state = inWordState
+			case escapeRuneClass:
+				state = escapingQuotedState
+			default:
+				// value = append(value, nextRune)
+				value.WriteRune(nextRune)
+			}
+		case quotingState: // in non-escaping single quotes
+			switch nextRuneType {
+			case eofRuneClass:
+				err = fmt.Errorf("EOF found when expecting closing quote")
+				token := &Token{
+					tokenType: tokenType,
+					value:     value.String(),
+				}
+				return token, err
+			case nonEscapingQuoteRuneClass:
+				state = inWordState
+			default:
+				// value = append(value, nextRune)
+				value.WriteRune(nextRune)
+			}
+		case commentState: // in a comment
+			switch nextRuneType {
+			case eofRuneClass:
+				token := &Token{
+					tokenType: tokenType,
+					value:     value.String(),
+				}
+				return token, err
+			case spaceRuneClass:
+				if nextRune == '\n' {
+					state = startState
+					token := &Token{
+						tokenType: tokenType,
+						value:     value.String(), // last
+					}
+					return token, err
+				} else {
+					// value = append(value, nextRune)
+					value.WriteRune(nextRune)
+				}
+			default:
+				// value = append(value, nextRune) // last
+				value.WriteRune(nextRune)
+			}
+		default:
+			return nil, fmt.Errorf("Unexpected state: %v", state)
+		}
+	}
+}
+
+// Next returns the next token in the stream.
+func (t *StringTokenizer) Next() (*Token, error) {
+	return t.scanStream()
+}
+
+func (t *StringTokenizer) NextStr() (string, error) {
+	for {
+		token, err := t.Next()
+		if err != nil {
+			return "", err
+		}
+		switch token.tokenType {
+		case WordToken:
+			return token.value, nil
+		case CommentToken:
+			// skip comments
+		default:
+			return "", fmt.Errorf("Unknown token type: %v", token.tokenType)
+		}
+	}
+}
+
 // Split partitions a string into a slice of strings.
 func Split(s string) ([]string, error) {
-	l := NewLexer(strings.NewReader(s))
+	l := StringTokenizer{str: s}
+	// l := NewLexer(strings.NewReader(s))
 	subStrings := make([]string, 0)
 	for {
-		word, err := l.Next()
+		word, err := l.NextStr()
 		if err != nil {
 			if err == io.EOF {
 				return subStrings, nil
