@@ -17,6 +17,9 @@ limitations under the License.
 package shlex
 
 import (
+	"encoding/json"
+	"io/ioutil"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -104,4 +107,53 @@ func BenchmarkSplit(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		Split(testString)
 	}
+}
+
+type TestCase struct {
+	Input  string   `json:"input"`
+	Output []string `json:"output"`
+}
+
+func LoadTestCase(t *testing.T, name string) []TestCase {
+	data, err := ioutil.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tests []TestCase
+	if err := json.Unmarshal(data, &tests); err != nil {
+		t.Fatal(err)
+	}
+	return tests
+}
+
+// TODO: make this pass (or just ignore it)
+func TestPythonCompat(t *testing.T) {
+	t.Skip("FIXME")
+
+	t.Run("Shlex", func(t *testing.T) {
+		tests := LoadTestCase(t, "testdata/data.json")
+		for _, x := range tests {
+			got, err := Split(x.Input)
+			if err != nil {
+				t.Errorf("%q: error: %v", x.Input, err)
+				continue
+			}
+			if !reflect.DeepEqual(got, x.Output) {
+				t.Errorf("%q: got: %q want: %q", x.Input, got, x.Output)
+			}
+		}
+	})
+	t.Run("Posix", func(t *testing.T) {
+		tests := LoadTestCase(t, "testdata/posix_data.json")
+		for _, x := range tests {
+			got, err := Split(x.Input)
+			if err != nil {
+				t.Errorf("%q: error: %v", x.Input, err)
+				continue
+			}
+			if !reflect.DeepEqual(got, x.Output) {
+				t.Errorf("%q: got: %q want: %q", x.Input, got, x.Output)
+			}
+		}
+	})
 }
